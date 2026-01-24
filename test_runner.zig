@@ -97,7 +97,7 @@ pub fn main() !void {
                 fail += 1;
                 Printer.status(.fail, "\n{s}\n\"{s}\" - {s}\n{s}\n", .{ BORDER, friendly_name, @errorName(err), BORDER });
                 if (@errorReturnTrace()) |trace| {
-                    std.debug.dumpStackTrace(trace.*);
+                    std.debug.dumpStackTrace(trace);
                 }
                 if (env.fail_first) {
                     break;
@@ -134,7 +134,8 @@ pub fn main() !void {
     Printer.fmt("\n", .{});
     try slowest.display();
     Printer.fmt("\n", .{});
-    std.posix.exit(if (fail == 0) 0 else 1);
+    const exit_status: u8 = if (fail == 0) 0 else 1;
+    std.process.exit(exit_status);
 }
 
 const Printer = struct {
@@ -255,14 +256,17 @@ const Env = struct {
     }
 
     fn readEnv(allocator: Allocator, key: []const u8) ?[]const u8 {
-        const v = std.process.getEnvVarOwned(allocator, key) catch |err| {
-            if (err == error.EnvironmentVariableNotFound) {
-                return null;
-            }
-            std.log.warn("failed to get env var {s} due to err {}", .{ key, err });
+        const key_z = allocator.allocSentinel(u8, key.len, 0) catch |err| {
+            std.log.warn("failed to allocate env var key {s} due to err {}", .{ key, err });
             return null;
         };
-        return v;
+        defer allocator.free(key_z);
+        @memcpy(key_z[0..key.len], key);
+        const value_z = std.c.getenv(key_z) orelse return null;
+        return allocator.dupe(u8, std.mem.span(value_z)) catch |err| {
+            std.log.warn("failed to copy env var {s} due to err {}", .{ key, err });
+            return null;
+        };
     }
 
     fn readEnvBool(allocator: Allocator, key: []const u8, deflt: bool) bool {

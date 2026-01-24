@@ -16,14 +16,25 @@ const Thread = std.Thread;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 
-const net = std.net;
+const net = @import("websocket").compat;
 const Stream = net.Stream;
-const NetConn = net.StreamServer.Connection;
 
-const posix = std.posix;
+const posix = @import("posix_compat");
 const log = std.log.scoped(.httpz);
 
 const MAX_TIMEOUT = 2_147_483_647;
+
+fn timestampSeconds() u64 {
+    const inst = std.time.Instant.now() catch return 0;
+    if (comptime @TypeOf(inst.timestamp) == std.posix.timespec) {
+        return @intCast(inst.timestamp.sec);
+    }
+    return @intCast(inst.timestamp);
+}
+
+fn sleepNs(ns: u64) void {
+    std.Io.sleep(std.Io.Threaded.global_single_threaded.ioBasic(), std.Io.Duration.fromNanoseconds(@as(i96, ns)), .awake) catch {};
+}
 
 // This is our Blocking worker. It's very different than NonBlocking and much
 // simpler. (WSH is our websocket handler, and can be void)
@@ -52,13 +63,13 @@ pub fn Blocking(comptime S: type, comptime WSH: type) type {
 
         const Timeout = struct {
             sec: u32,
-            timeval: [@sizeOf(std.posix.timeval)]u8,
+            timeval: [@sizeOf(posix.timeval)]u8,
 
             // if sec is null, it means we want to cancel the timeout.
             fn init(sec: ?u32) Timeout {
                 return .{
                     .sec = if (sec) |s| s else MAX_TIMEOUT,
-                    .timeval = std.mem.toBytes(std.posix.timeval{ .sec = @intCast(sec orelse 0), .usec = 0 }),
+                    .timeval = std.mem.toBytes(posix.timeval{ .sec = @intCast(sec orelse 0), .usec = 0 }),
                 };
             }
         };
@@ -209,7 +220,7 @@ pub fn Blocking(comptime S: type, comptime WSH: type) type {
 
             conn.address = address;
             conn.handover = .unknown;
-            conn.stream = .{ .handle = socket };
+            conn.stream = net.streamFromHandle(socket);
 
             var is_keepalive = false;
             while (true) {
@@ -263,10 +274,10 @@ pub fn Blocking(comptime S: type, comptime WSH: type) type {
             var is_first = true;
             var reader = stream.reader(&.{}); // Request.State does its own buffering
             while (true) {
-                const done = conn.req_state.parse(conn.req_arena.allocator(), reader.interface()) catch |err| {
+                const done = conn.req_state.parse(conn.req_arena.allocator(), &reader.interface) catch |err| {
                     switch (err) {
                         error.ReadFailed => {
-                            if (reader.getError()) |e| {
+                            if (reader.err) |e| {
                                 switch (e) {
                                     error.WouldBlock => {
                                         if (is_keepalive and is_first) {
@@ -460,8 +471,9 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
             var buffer_pool = try initializeBufferPool(allocator, config);
             errdefer buffer_pool.deinit();
 
-            var conn_mem_pool = std.heap.MemoryPool(Conn(WSH)).init(allocator);
-            errdefer conn_mem_pool.deinit();
+            const max_conn = config.workers.max_conn orelse 8_192;
+            var conn_mem_pool = try std.heap.MemoryPool(Conn(WSH)).initCapacity(allocator, max_conn);
+            errdefer conn_mem_pool.deinit(allocator);
 
             var http_conn_pool = try HTTPConnPool.init(allocator, buffer_pool, websocket, loop.fd, config);
             errdefer http_conn_pool.deinit();
@@ -514,7 +526,7 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
             self.shutdownConcurrentList(&self.keepalive_list);
 
             self.buffer_pool.deinit();
-            self.conn_mem_pool.deinit();
+            self.conn_mem_pool.deinit(allocator);
             self.http_conn_pool.deinit();
             allocator.destroy(self.buffer_pool);
 
@@ -560,7 +572,7 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
 
                 var it = self.loop.wait(timeout) catch |err| {
                     log.err("Failed to wait on events: {}", .{err});
-                    std.Thread.sleep(std.time.ns_per_s);
+                    sleepNs(std.time.ns_per_s);
                     continue;
                 };
                 now = timestamp(now);
@@ -570,7 +582,7 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
                     switch (event) {
                         .accept => self.accept(listener, now) catch |err| {
                             log.err("Failed to accept connection: {}", .{err});
-                            std.Thread.sleep(std.time.ns_per_ms * 5);
+                            sleepNs(std.time.ns_per_ms * 5);
                         },
                         .signal => self.processSignal(&closed_conn),
                         .recv => |conn| switch (conn.protocol) {
@@ -593,9 +605,9 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
 
                                 const stream = http_conn.stream;
                                 var reader = stream.reader(&.{}); // Request.State does its own buffering
-                                const done = http_conn.req_state.parse(http_conn.req_arena.allocator(), reader.interface()) catch |err| {
+                                const done = http_conn.req_state.parse(http_conn.req_arena.allocator(), &reader.interface) catch |err| {
                                     // maybe a write fail or something, doesn't matter, we're closing the connection
-                                    requestError(http_conn, reader.getError() orelse err) catch {};
+                                    requestError(http_conn, reader.err orelse err) catch {};
 
                                     // impossible to fail when false is passed
                                     http_conn.requestDone(self.retain_allocated_bytes, false) catch unreachable;
@@ -690,7 +702,7 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
                 const nonblocking = @as(u32, @bitCast(posix.O{ .NONBLOCK = true }));
                 std.debug.assert(socket_flags & nonblocking == nonblocking);
 
-                const conn = try self.conn_mem_pool.create();
+                const conn = try self.conn_mem_pool.create(self.allocator);
                 errdefer self.conn_mem_pool.destroy(conn);
 
                 const http_conn = try self.http_conn_pool.acquire();
@@ -700,7 +712,7 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
                 http_conn._io_mode = .nonblocking;
                 http_conn.address = address;
                 http_conn.socket_flags = socket_flags;
-                http_conn.stream = .{ .handle = socket };
+                http_conn.stream = net.streamFromHandle(socket);
                 http_conn.timeout = now + self.timeout_request;
 
                 self.len += 1;
@@ -1202,7 +1214,7 @@ fn EPoll(comptime WSH: type) type {
                     .data = .{ .ptr = 2 },
                     .events = linux.EPOLL.IN,
                 };
-                try std.posix.epoll_ctl(self.fd, linux.EPOLL.CTL_ADD, self.close_fd, &event);
+                try posix.epoll_ctl(self.fd, linux.EPOLL.CTL_ADD, self.close_fd, &event);
             }
 
             {
@@ -1210,7 +1222,7 @@ fn EPoll(comptime WSH: type) type {
                     .data = .{ .ptr = 1 },
                     .events = linux.EPOLL.IN | linux.EPOLL.ET,
                 };
-                try std.posix.epoll_ctl(self.fd, linux.EPOLL.CTL_ADD, self.event_fd, &event);
+                try posix.epoll_ctl(self.fd, linux.EPOLL.CTL_ADD, self.event_fd, &event);
             }
         }
 
@@ -1228,11 +1240,11 @@ fn EPoll(comptime WSH: type) type {
 
         fn monitorAccept(self: *Self, fd: posix.fd_t) !void {
             var event = linux.epoll_event{ .events = linux.EPOLL.IN | linux.EPOLL.EXCLUSIVE, .data = .{ .ptr = 0 } };
-            return std.posix.epoll_ctl(self.fd, linux.EPOLL.CTL_ADD, fd, &event);
+            return posix.epoll_ctl(self.fd, linux.EPOLL.CTL_ADD, fd, &event);
         }
 
         fn pauseAccept(self: *Self, fd: posix.fd_t) !void {
-            return std.posix.epoll_ctl(self.fd, linux.EPOLL.CTL_DEL, fd, null);
+            return posix.epoll_ctl(self.fd, linux.EPOLL.CTL_DEL, fd, null);
         }
 
         fn monitorRead(self: *Self, conn: *Conn(WSH)) !void {
@@ -1267,7 +1279,7 @@ fn EPoll(comptime WSH: type) type {
                 }
             }
 
-            const event_count = posix.epoll_wait(self.fd, event_list, timeout);
+            const event_count = try posix.epoll_wait(self.fd, event_list, timeout);
             return .{
                 .index = 0,
                 .event_fd = self.event_fd,
@@ -1338,8 +1350,8 @@ const HTTPConnPool = struct {
         var conns = try allocator.alloc(*HTTPConn, min);
         errdefer allocator.free(conns);
 
-        var http_mem_pool = std.heap.MemoryPool(HTTPConn).init(allocator);
-        errdefer http_mem_pool.deinit();
+        var http_mem_pool = try std.heap.MemoryPool(HTTPConn).initCapacity(allocator, min);
+        errdefer http_mem_pool.deinit(allocator);
 
         var initialized: usize = 0;
         errdefer {
@@ -1349,7 +1361,7 @@ const HTTPConnPool = struct {
         }
 
         for (0..min) |i| {
-            const conn = try http_mem_pool.create();
+            const conn = try http_mem_pool.create(allocator);
             conn.* = try HTTPConn.init(allocator, buffer_pool, websocket, loop, config);
 
             conns[i] = conn;
@@ -1379,7 +1391,7 @@ const HTTPConnPool = struct {
             conn.deinit(allocator);
         }
         allocator.free(self.conns);
-        self.http_mem_pool.deinit();
+        self.http_mem_pool.deinit(allocator);
     }
 
     fn acquire(self: *HTTPConnPool) !*HTTPConn {
@@ -1391,7 +1403,7 @@ const HTTPConnPool = struct {
             self.unlock();
 
             self.http_mem_pool_mut.lock();
-            const conn = try self.http_mem_pool.create();
+            const conn = try self.http_mem_pool.create(self.allocator);
             self.http_mem_pool_mut.unlock();
             errdefer {
                 self.http_mem_pool_mut.lock();
@@ -1693,15 +1705,7 @@ pub const HTTPConn = struct {
         var i: usize = 0;
         while (true) {
             var n = writer.interface.writeVec(vec[i..]) catch |err| {
-                if (writer.err) |socket_err| {
-                    switch (socket_err) {
-                        error.WouldBlock => {
-                            try self.blockingMode();
-                            continue;
-                        },
-                        else => return err,
-                    }
-                }
+                _ = writer.err;
                 return err;
             };
             while (n >= vec[i].len) {
@@ -1744,7 +1748,7 @@ pub const HTTPConn = struct {
 
 pub fn timestamp(clamp: u32) u32 {
     if (comptime @hasDecl(posix, "CLOCK") == false or posix.CLOCK == void) {
-        const value: u32 = @intCast(std.time.timestamp());
+        const value: u32 = @intCast(timestampSeconds());
         return if (value <= clamp) return clamp + 1 else value;
     }
     const ts = posix.clock_gettime(posix.CLOCK.MONOTONIC) catch unreachable;

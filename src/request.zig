@@ -4,6 +4,8 @@ const os = std.os;
 const http = @import("httpz.zig");
 const buffer = @import("buffer.zig");
 const metrics = @import("metrics.zig");
+const net = @import("websocket").compat;
+const posix = @import("posix_compat");
 
 const Self = @This();
 
@@ -14,7 +16,7 @@ const StringKeyValue = @import("key_value.zig").StringKeyValue;
 const MultiFormKeyValue = @import("key_value.zig").MultiFormKeyValue;
 const Config = @import("config.zig").Config.Request;
 
-const Address = std.net.Address;
+const Address = net.Address;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 
@@ -194,11 +196,11 @@ pub const Request = struct {
         const conn = self.conn;
         if (self.unread_body > 0) {
             try conn.blockingMode();
-            const timeval = std.mem.toBytes(std.posix.timeval{
+            const timeval = std.mem.toBytes(posix.timeval{
                 .sec = @intCast(@divTrunc(timeout_ms, 1000)),
                 .usec = @intCast(@mod(timeout_ms, 1000) * 1000),
             });
-            try std.posix.setsockopt(conn.stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, &timeval);
+            try posix.setsockopt(conn.stream.handle, posix.SOL.SOCKET, posix.SO.RCVTIMEO, &timeval);
         }
 
         return .{
@@ -517,7 +519,7 @@ pub const Request = struct {
     pub const Reader = struct {
         buffer: []const u8,
         unread_body: *usize,
-        socket: std.posix.socket_t,
+        socket: posix.socket_t,
         interface: std.Io.Reader,
 
         pub fn stream(io_r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
@@ -543,7 +545,7 @@ pub const Request = struct {
             }
 
             const buf = if (into.len > unread) into[0..unread] else into;
-            const n = try std.posix.read(self.socket, buf);
+            const n = try posix.read(self.socket, buf);
             self.unread_body.* = unread - n;
             return n;
         }
@@ -555,7 +557,7 @@ pub const Request = struct {
         pub fn get(self: Cookie, name: []const u8) ?[]const u8 {
             var it = std.mem.splitScalar(u8, self.header, ';');
             while (it.next()) |kv| {
-                const trimmed = std.mem.trimLeft(u8, kv, " ");
+                const trimmed = std.mem.trimStart(u8, kv, " ");
                 if (name.len >= trimmed.len) {
                     // need at least an '=' beyond the name
                     continue;
@@ -1705,9 +1707,20 @@ test "request: fuzz" {
             var conn = ctx.conn;
             var fake_reader = ctx.fakeReader();
             const fr = &fake_reader.interface;
+            var parse_failed = false;
             while (true) {
-                const done = try conn.req_state.parse(conn.req_arena.allocator(), fr);
+                const done = conn.req_state.parse(conn.req_arena.allocator(), fr) catch |err| blk: {
+                    if (err == error.UnknownMethod) {
+                        parse_failed = true;
+                        break :blk true;
+                    }
+                    return err;
+                };
                 if (done) break;
+            }
+
+            if (parse_failed) {
+                continue;
             }
 
             var request = Request.init(conn.req_arena.allocator(), conn);
@@ -1782,7 +1795,7 @@ fn testParse(input: []const u8, config: Config) !Request {
     var ctx = t.Context.allocInit(t.arena.allocator(), .{ .request = config });
     ctx.write(input);
     var reader = ctx.stream.reader(&.{});
-    const r = reader.interface();
+    const r = &reader.interface;
     while (true) {
         const done = try ctx.conn.req_state.parse(ctx.conn.req_arena.allocator(), r);
         if (done) break;
@@ -1795,7 +1808,7 @@ fn expectParseError(expected: anyerror, input: []const u8, config: Config) !void
     defer ctx.deinit();
 
     var reader = ctx.stream.reader(&.{});
-    const r = reader.interface();
+    const r = &reader.interface;
     ctx.write(input);
     try t.expectError(expected, ctx.conn.req_state.parse(ctx.conn.req_arena.allocator(), r));
 }

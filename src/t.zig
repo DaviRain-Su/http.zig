@@ -5,14 +5,15 @@
 const std = @import("std");
 const httpz = @import("httpz.zig");
 
-const posix = std.posix;
+const posix = @import("posix_compat");
 const Allocator = std.mem.Allocator;
+const net = @import("websocket").compat;
 
 const Conn = @import("worker.zig").HTTPConn;
 const BufferPool = @import("buffer.zig").Pool;
 
 pub fn expectEqual(expected: anytype, actual: anytype) !void {
-    try std.testing.expectEqual(@as(@TypeOf(actual), expected), actual);
+    try std.testing.expectEqual(expected, actual);
 }
 
 pub const expectError = std.testing.expectError;
@@ -33,10 +34,10 @@ pub fn getRandom() std.Random.DefaultPrng {
 
 pub const Context = struct {
     // the stream that the server gets
-    stream: std.net.Stream,
+    stream: net.Stream,
 
     // the client (e.g. browser stream)
-    client: std.net.Stream,
+    client: net.Stream,
 
     closed: bool = false,
 
@@ -80,8 +81,8 @@ pub const Context = struct {
             posix.setsockopt(pair[1], posix.SOL.SOCKET, posix.SO.SNDBUF, &std.mem.toBytes(@as(c_int, 20_000))) catch unreachable;
         }
 
-        const server = std.net.Stream{ .handle = pair[0] };
-        const client = std.net.Stream{ .handle = pair[1] };
+        const server = net.streamFromHandle(pair[0]);
+        const client = net.streamFromHandle(pair[1]);
 
         var ctx_arena = ctx_allocator.create(std.heap.ArenaAllocator) catch unreachable;
         ctx_arena.* = std.heap.ArenaAllocator.init(ctx_allocator);
@@ -112,7 +113,7 @@ pub const Context = struct {
             ._state = .request,
             .handover = .close,
             .stream = server,
-            .address = std.net.Address.initIp4([_]u8{ 127, 0, 0, 200 }, 0),
+            .address = net.Address.parseIp("127.0.0.200", 0) catch unreachable,
             .req_state = req_state,
             .res_state = res_state,
             .timeout = 0,
@@ -148,12 +149,12 @@ pub const Context = struct {
         const listener = posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0) catch unreachable;
         defer posix.close(listener);
 
-        var address = try std.net.Address.parseIp("127.0.0.1", 0);
+        var address = try net.Address.parseIp("127.0.0.1", 0);
         try posix.setsockopt(listener, posix.SOL.SOCKET, posix.SO.REUSEADDR, &std.mem.toBytes(@as(c_int, 1)));
         try posix.bind(listener, &address.any, address.getOsSockLen());
         try posix.listen(listener, 0);
 
-        var len: posix.socklen_t = @sizeOf(std.net.Address);
+        var len: posix.socklen_t = @sizeOf(net.Address);
         try posix.getsockname(listener, &address.any, &len);
 
         var thread = try std.Thread.spawn(.{}, struct {
@@ -193,14 +194,14 @@ pub const Context = struct {
         var arr: std.ArrayList(u8) = .empty;
 
         var reader = self.client.reader(&.{});
-        const r = reader.interface();
+        const r = &reader.interface;
         while (true) {
             const n = r.readSliceShort(&buf) catch |err|
                 switch (err) {
                     error.ReadFailed => {
-                        if (reader.getError()) |e| {
+                        if (reader.err) |e| {
                             switch (e) {
-                                error.WouldBlock => return arr,
+                                error.Timeout => return arr,
                                 else => return e,
                             }
                         }
@@ -218,7 +219,7 @@ pub const Context = struct {
         var buf = try allocator.alloc(u8, expected.len);
         defer allocator.free(buf);
         var reader = self.client.reader(&.{});
-        const r = reader.interface();
+        const r = &reader.interface;
         while (pos < buf.len) {
             const n = try r.readSliceShort(buf[pos..]);
             if (n == 0) break;
@@ -236,9 +237,9 @@ pub const Context = struct {
 
         const n = r.readSliceShort(buf[0..]) catch |err| blk: switch (err) {
             error.ReadFailed => {
-                if (reader.getError()) |e| {
+                if (reader.err) |e| {
                     switch (e) {
-                        error.WouldBlock => break :blk 0,
+                        error.Timeout => break :blk 0,
                         else => @panic(@errorName(e)),
                     }
                 }

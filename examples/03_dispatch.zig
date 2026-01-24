@@ -29,6 +29,14 @@ pub fn main() !void {
     try server.listen();
 }
 
+fn timestampSeconds() i64 {
+    const inst = std.time.Instant.now() catch return 0;
+    if (comptime @TypeOf(inst.timestamp) == std.posix.timespec) {
+        return @intCast(inst.timestamp.sec);
+    }
+    return @intCast(inst.timestamp);
+}
+
 const Handler = struct {
     // In addition to the special "notFound" and "uncaughtError" shown in example 2
     // the special "dispatch" method can be used to gain more control over request handling.
@@ -42,7 +50,7 @@ const Handler = struct {
         // we could do authentication and set the response directly on error.
         try action(self, req, res);
 
-        std.debug.print("ts={d} us={d} path={s}\n", .{ std.time.timestamp(), start.lap() / 1000, req.url.path });
+        std.debug.print("ts={d} us={d} path={s}\n", .{ timestampSeconds(), start.lap() / 1000, req.url.path });
     }
 };
 

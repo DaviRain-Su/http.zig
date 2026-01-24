@@ -28,6 +28,10 @@ pub fn main() !void {
     try server.listen();
 }
 
+fn sleepNs(ns: u64) void {
+    std.Io.sleep(std.Io.Threaded.global_single_threaded.ioBasic(), std.Io.Duration.fromNanoseconds(@as(i96, ns)), .awake) catch {};
+}
+
 fn index(_: *httpz.Request, res: *httpz.Response) !void {
     const wait_time = 1_000_000_000; // 1 second
 
@@ -45,10 +49,10 @@ fn index(_: *httpz.Request, res: *httpz.Response) !void {
         \\  </body>
         \\</html>
     );
-    std.Thread.sleep(wait_time);
+    sleepNs(wait_time);
     try res.chunk("\n<span slot='item-2'>Item 2</span>");
-    std.Thread.sleep(wait_time);
+    sleepNs(wait_time);
     try res.chunk("\n<span slot='item-0'>Item 0</span>");
-    std.Thread.sleep(wait_time);
+    sleepNs(wait_time);
     try res.chunk("\n<span slot='item-1'>Item 1</span>");
 }

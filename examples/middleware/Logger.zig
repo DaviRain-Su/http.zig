@@ -34,11 +34,16 @@ pub fn execute(self: *const Logger, req: *httpz.Request, res: *httpz.Response, e
     // Better to use an std.time.Timer to measure elapsed time
     // but we need the "start" time for our log anyways, so while this might occasionally
     // report wrong/strange "elapsed" time, it's simpler to do.
-    const start = std.time.microTimestamp();
+    const start = std.time.Instant.now() catch unreachable;
+    var timer = std.time.Timer.start() catch unreachable;
 
     defer {
-        const elapsed = std.time.microTimestamp() - start;
-        std.log.info("{d}\t{s}?{s}\t{d}\t{d}us", .{start, req.url.path, if (self.query) req.url.query else "", res.status, elapsed});
+        const elapsed = timer.lap() / std.time.ns_per_us;
+        const ts = if (comptime @TypeOf(start.timestamp) == std.posix.timespec)
+            @as(i64, @intCast(start.timestamp.sec)) * std.time.us_per_s + @as(i64, @intCast(@divTrunc(start.timestamp.nsec, std.time.ns_per_us)))
+        else
+            @as(i64, @intCast(start.timestamp));
+        std.log.info("{d}\t{s}?{s}\t{d}\t{d}us", .{ts, req.url.path, if (self.query) req.url.query else "", res.status, elapsed});
     }
 
     // If you don't call executor.next(), there will be no further processing of

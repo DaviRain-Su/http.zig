@@ -7,6 +7,11 @@ pub fn build(b: *std.Build) !void {
     const dep_opts = .{ .target = target, .optimize = optimize };
     const metrics_module = b.dependency("metrics", dep_opts).module("metrics");
     const websocket_module = b.dependency("websocket", dep_opts).module("websocket");
+    const posix_compat_module = b.createModule(.{
+        .root_source_file = b.path("src/posix_compat.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 
     const enable_tsan = b.option(bool, "tsan", "Enable ThreadSanitizer");
 
@@ -18,6 +23,19 @@ pub fn build(b: *std.Build) !void {
         .imports = &.{
             .{ .name = "metrics", .module = metrics_module },
             .{ .name = "websocket", .module = websocket_module },
+            .{ .name = "posix_compat", .module = posix_compat_module },
+        },
+    });
+    const httpz_test_module = b.createModule(.{
+        .root_source_file = b.path("src/httpz.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = enable_tsan,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "metrics", .module = metrics_module },
+            .{ .name = "websocket", .module = websocket_module },
+            .{ .name = "posix_compat", .module = posix_compat_module },
         },
     });
     {
@@ -25,15 +43,19 @@ pub fn build(b: *std.Build) !void {
         options.addOption(bool, "httpz_blocking", false);
         httpz_module.addOptions("build", options);
     }
+    {
+        const options = b.addOptions();
+        options.addOption(bool, "httpz_blocking", false);
+        httpz_test_module.addOptions("build", options);
+    }
 
     {
         const test_filter = b.option([]const []const u8, "test-filter", "Filters for test: specify multiple times for multiple filters");
         const tests = b.addTest(.{
-            .root_module = httpz_module,
+            .root_module = httpz_test_module,
             .filters = test_filter orelse &.{},
             .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
         });
-        tests.linkLibC();
         const force_blocking = b.option(bool, "force_blocking", "Force blocking mode") orelse false;
         {
             const options = b.addOptions();
@@ -83,11 +105,12 @@ pub fn build(b: *std.Build) !void {
                     .optimize = optimize,
                     .imports = &.{
                         .{ .name = "httpz", .module = httpz_module },
+                        .{ .name = "posix_compat", .module = posix_compat_module },
                     },
                 }),
             });
             if (ex.libc) {
-                exe.linkLibC();
+                exe.root_module.link_libc = true;
             }
             b.installArtifact(exe);
 

@@ -9,6 +9,10 @@ pub const Opts = struct {
     buffer_size: usize,
 };
 
+fn sleepNs(ns: u64) void {
+    std.Io.sleep(std.Io.Threaded.global_single_threaded.ioBasic(), std.Io.Duration.fromNanoseconds(@as(i96, ns)), .awake) catch {};
+}
+
 pub fn ThreadPool(comptime F: anytype) type {
     const BATCH_SIZE = 16;
 
@@ -292,17 +296,10 @@ fn SpawnArgs(FullArgs: anytype) type {
     // []u8. But this ThreadPool is private and being used for 2 specific cases
     // that we control.
 
-    var fields: [ARG_COUNT]std.builtin.Type.StructField = undefined;
-    inline for (full_fields[0..ARG_COUNT], 0..) |field, index| fields[index] = field;
+    var arg_types: [ARG_COUNT]type = undefined;
+    inline for (full_fields[0..ARG_COUNT], 0..) |field, index| arg_types[index] = field.type;
 
-    return @Type(.{
-        .@"struct" = .{
-            .layout = .auto,
-            .is_tuple = true,
-            .fields = &fields,
-            .decls = &.{},
-        },
-    });
+    return @Tuple(&arg_types);
 }
 
 const t = @import("t.zig");
@@ -331,7 +328,7 @@ test "ThreadPool: batch add" {
                 tp.spawn(.{4});
             }
             while (tp.empty() == false) {
-                std.Thread.sleep(std.time.ns_per_ms);
+                sleepNs(std.time.ns_per_ms);
             }
             tp.stop();
             try t.expectEqual(10_000, testSum);
@@ -367,7 +364,7 @@ test "ThreadPool: small fuzz" {
         tp.spawn(.{3});
     }
     while (tp.empty() == false) {
-        std.Thread.sleep(std.time.ns_per_ms);
+        sleepNs(std.time.ns_per_ms);
     }
     tp.stop();
     try t.expectEqual(60_000, testSum);
@@ -403,7 +400,7 @@ test "ThreadPool: large fuzz" {
         tp.spawn(.{6});
     }
     while (tp.empty() == false) {
-        std.Thread.sleep(std.time.ns_per_ms);
+        sleepNs(std.time.ns_per_ms);
     }
     tp.stop();
     try t.expectEqual(210_000, testSum);
@@ -438,5 +435,5 @@ fn testIncr(c: u64, buf: []u8) void {
         else => unreachable,
     }
     // let the threadpool queue get backed up
-    std.Thread.sleep(std.time.ns_per_us * 20);
+    sleepNs(std.time.ns_per_us * 20);
 }

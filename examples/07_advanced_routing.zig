@@ -47,6 +47,14 @@ pub fn main() !void {
     try server.listen();
 }
 
+fn timestampSeconds() i64 {
+    const inst = std.time.Instant.now() catch return 0;
+    if (comptime @TypeOf(inst.timestamp) == std.posix.timespec) {
+        return @intCast(inst.timestamp.sec);
+    }
+    return @intCast(inst.timestamp);
+}
+
 const Handler = struct {
     log: bool,
 
@@ -58,7 +66,7 @@ const Handler = struct {
     pub fn dispatch(h: *Handler, action: httpz.Action(*Handler), req: *httpz.Request, res: *httpz.Response) !void {
         try action(h, req, res);
         if (h.log) {
-            std.debug.print("ts={d} path={s} status={d}\n", .{ std.time.timestamp(), req.url.path, res.status });
+            std.debug.print("ts={d} path={s} status={d}\n", .{ timestampSeconds(), req.url.path, res.status });
         }
     }
 };

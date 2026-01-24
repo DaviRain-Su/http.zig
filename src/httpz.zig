@@ -17,8 +17,8 @@ pub const Url = @import("url.zig").Url;
 pub const Config = @import("config.zig").Config;
 
 const Thread = std.Thread;
-const net = std.net;
-const posix = std.posix;
+const net = @import("websocket").compat;
+const posix = @import("posix_compat");
 const Allocator = std.mem.Allocator;
 const FixedBufferAllocator = std.heap.FixedBufferAllocator;
 
@@ -351,12 +351,15 @@ pub fn Server(comptime H: type) type {
             var no_delay = true;
             const address = blk: {
                 if (config.unix_path) |unix_path| {
-                    if (comptime std.net.has_unix_sockets == false) {
+                    if (comptime net.has_unix_sockets == false) {
                         return error.UnixPathNotSupported;
                     }
                     no_delay = false;
-                    std.fs.deleteFileAbsolute(unix_path) catch {};
-                    break :blk try net.Address.initUnix(unix_path);
+                    var path_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+                    if (std.fmt.bufPrintZ(&path_buf, "{s}", .{unix_path})) |zpath| {
+                        _ = posix.system.unlink(zpath);
+                    } else |_| {}
+                    break :blk try net.initUnix(unix_path);
                 } else {
                     const listen_port = config.port orelse 5882;
                     const listen_address = config.address orelse "127.0.0.1";
@@ -979,7 +982,7 @@ test "tests:afterAll" {
     cors_single_server.deinit();
     cors_multiple_server.deinit();
 
-    try t.expectEqual(false, global_test_allocator.detectLeaks());
+    try t.expectEqual(@as(usize, 0), global_test_allocator.detectLeaks());
 }
 
 test "httpz: quick shutdown" {
@@ -1722,6 +1725,10 @@ test "httpz: keepalive with explicit write" {
     try t.expectString("HTTP/1.1 200 \r\nContent-Length: 46\r\n\r\n{\"state\":3,\"method\":\"GET\",\"path\":\"/write/123\"}", testReadAll(stream, &buf));
 }
 
+fn sleepNs(ns: u64) void {
+    std.Io.sleep(std.Io.Threaded.global_single_threaded.ioBasic(), std.Io.Duration.fromNanoseconds(@as(i96, ns)), .awake) catch {};
+}
+
 test "httpz: request in chunks" {
     const stream = testStream(5993);
     defer stream.close();
@@ -1729,7 +1736,7 @@ test "httpz: request in chunks" {
     const w = &writer.interface;
     try w.writeAll("GET /api/v2/use");
     try w.flush();
-    std.Thread.sleep(std.time.ns_per_ms * 10);
+    sleepNs(std.time.ns_per_ms * 10);
     try w.writeAll("rs/11 HTTP/1.1\r\n\r\n");
     try w.flush();
 
@@ -1866,7 +1873,7 @@ test "httpz: request body reader" {
         while (req.len > 0) {
             const len = random.uintAtMost(usize, req.len - 1) + 1;
             try w.writeAll(req[0..len]);
-            std.Thread.sleep(std.time.ns_per_ms * 2);
+            sleepNs(std.time.ns_per_ms * 2);
             req = req[len..];
         }
 
@@ -1918,19 +1925,19 @@ test "websocket: upgrade" {
     var buf: [100]u8 = undefined;
     var wait_count: usize = 0;
     var reader = stream.reader(&.{});
-    const r = reader.interface();
+    const r = &reader.interface;
     while (pos < 16) {
         const n = r.readSliceShort(buf[pos..]) catch |err|
             switch (err) {
                 error.ReadFailed => {
-                    if (reader.getError()) |e| {
+                    if (reader.err) |e| {
                         switch (e) {
-                            error.WouldBlock => {
+                            error.Timeout => {
                                 if (wait_count == 100) {
                                     break;
                                 }
                                 wait_count += 1;
-                                std.Thread.sleep(std.time.ns_per_ms);
+                                sleepNs(std.time.ns_per_ms);
                                 continue;
                             },
                             else => {},
@@ -1973,40 +1980,39 @@ test "ContentType: forX" {
     try t.expectEqual(ContentType.UNKNOWN, ContentType.forFile("must.spice"));
 }
 
-fn testStream(port: u16) std.net.Stream {
+fn testStream(port: u16) net.Stream {
     const timeout = std.mem.toBytes(posix.timeval{
         .sec = 0,
         .usec = 20_000,
     });
 
-    const address = std.net.Address.parseIp("127.0.0.1", port) catch unreachable;
-    const stream = std.net.tcpConnectToAddress(address) catch unreachable;
+    const address = net.Address.parseIp("127.0.0.1", port) catch unreachable;
+    const stream = net.tcpConnectToAddress(address) catch unreachable;
     posix.setsockopt(stream.handle, posix.SOL.SOCKET, posix.SO.RCVTIMEO, &timeout) catch unreachable;
     posix.setsockopt(stream.handle, posix.SOL.SOCKET, posix.SO.SNDTIMEO, &timeout) catch unreachable;
     return stream;
 }
 
-fn testReadAll(stream: std.net.Stream, buf: []u8) []u8 {
+fn testReadAll(stream: net.Stream, buf: []u8) []u8 {
     var pos: usize = 0;
     var blocked = false;
     var reader = stream.reader(&.{});
-    const r = reader.interface();
+    const r = &reader.interface;
     while (true) {
         std.debug.assert(pos < buf.len);
         var vecs: [1][]u8 = .{buf[pos..]};
         const n = r.readVec(&vecs) catch |err|
             switch (err) {
                 error.ReadFailed => {
-                    if (reader.getError()) |e| {
+                    if (reader.err) |e| {
                         switch (e) {
-                            error.WouldBlock => {
+                            error.Timeout => {
                                 if (blocked) return buf[0..pos];
                                 blocked = true;
-                                std.Thread.sleep(std.time.ns_per_ms);
+                                sleepNs(std.time.ns_per_ms);
                                 continue;
                             },
                             error.ConnectionResetByPeer => return buf[0..pos],
-                            else => @panic(@errorName(e)),
                         }
                     }
                     @panic(@errorName(err));
@@ -2023,30 +2029,30 @@ fn testReadAll(stream: std.net.Stream, buf: []u8) []u8 {
     unreachable;
 }
 
-fn testReadParsed(stream: std.net.Stream) testing.Testing.Response {
+fn testReadParsed(stream: net.Stream) testing.Testing.Response {
     var buf: [4096]u8 = undefined;
     const data = testReadAll(stream, &buf);
     return testing.parse(data) catch unreachable;
 }
 
-fn testReadHeader(stream: std.net.Stream) testing.Testing.Response {
+fn testReadHeader(stream: net.Stream) testing.Testing.Response {
     var pos: usize = 0;
     var blocked = false;
     var buf: [1024]u8 = undefined;
     var reader = stream.reader(&.{});
-    const r = reader.interface();
+    const r = &reader.interface;
     while (true) {
         std.debug.assert(pos < buf.len);
         var vecs: [1][]u8 = .{buf[pos..]};
         const n = r.readVec(&vecs) catch |err|
             switch (err) {
                 error.ReadFailed => {
-                    if (reader.getError()) |e| {
+                    if (reader.err) |e| {
                         switch (e) {
-                            error.WouldBlock => {
+                            error.Timeout => {
                                 if (blocked) unreachable;
                                 blocked = true;
-                                std.Thread.sleep(std.time.ns_per_ms);
+                                sleepNs(std.time.ns_per_ms);
                                 continue;
                             },
                             else => @panic(@errorName(e)),
@@ -2145,7 +2151,7 @@ const TestDummyHandler = struct {
     const StreamContext = struct {
         data: []const u8,
 
-        fn handle(self: StreamContext, stream: std.net.Stream) void {
+        fn handle(self: StreamContext, stream: net.Stream) void {
             var writer = stream.writer(&.{});
             const w = &writer.interface;
             w.writeAll(self.data) catch unreachable;
