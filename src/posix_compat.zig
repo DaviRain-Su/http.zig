@@ -6,6 +6,15 @@ pub const system = std.posix.system;
 pub const errno = std.posix.errno;
 pub const UnexpectedError = std.posix.UnexpectedError;
 
+// Helper function to get errno on macOS
+inline fn getErrno(rc: anytype) std.posix.E {
+    if (builtin.os.tag == .macos) {
+        _ = rc;
+        return @enumFromInt(std.c._errno().*);
+    }
+    return .SUCCESS;
+}
+
 pub const fd_t = std.posix.fd_t;
 pub const socket_t = std.posix.socket_t;
 pub const socklen_t = std.posix.socklen_t;
@@ -99,150 +108,313 @@ pub fn eventfd(count: u32, flags: u32) UnexpectedError!fd_t {
 }
 
 pub fn socket(domain: u32, socket_type: u32, protocol: u32) SocketError!socket_t {
-    if (builtin.os.tag != .linux) @compileError("posix_compat.socket only implemented for Linux");
-    const rc = linux.socket(@intCast(domain), @intCast(socket_type), @intCast(protocol));
-    switch (linux.errno(rc)) {
-        .SUCCESS => return @intCast(rc),
-        .ACCES => return error.AccessDenied,
-        .AFNOSUPPORT => return error.AddressFamilyUnsupported,
-        .PROTONOSUPPORT, .NOPROTOOPT => return error.ProtocolNotSupported,
-        .NFILE => return error.ProcessFdQuotaExceeded,
-        .MFILE => return error.SystemFdQuotaExceeded,
-        .NOMEM, .NOBUFS => return error.SystemResources,
-        .INVAL => return error.SocketTypeNotSupported,
-        else => |err| return std.posix.unexpectedErrno(err),
+    if (builtin.os.tag == .linux) {
+        const rc = linux.socket(@intCast(domain), @intCast(socket_type), @intCast(protocol));
+        switch (linux.errno(rc)) {
+            .SUCCESS => return @intCast(rc),
+            .ACCES => return error.AccessDenied,
+            .AFNOSUPPORT => return error.AddressFamilyUnsupported,
+            .PROTONOSUPPORT, .NOPROTOOPT => return error.ProtocolNotSupported,
+            .NFILE => return error.ProcessFdQuotaExceeded,
+            .MFILE => return error.SystemFdQuotaExceeded,
+            .NOMEM, .NOBUFS => return error.SystemResources,
+            .INVAL => return error.SocketTypeNotSupported,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    } else if (builtin.os.tag == .macos) {
+        const rc = std.c.socket(@intCast(domain), @intCast(socket_type), @intCast(protocol));
+        if (rc < 0) {
+            const err = getErrno(rc);
+            return switch (err) {
+                .ACCES => error.AccessDenied,
+                .AFNOSUPPORT => error.AddressFamilyUnsupported,
+                .PROTONOSUPPORT, .NOPROTOOPT => error.ProtocolNotSupported,
+                .NFILE => error.ProcessFdQuotaExceeded,
+                .MFILE => error.SystemFdQuotaExceeded,
+                .NOMEM, .NOBUFS => error.SystemResources,
+                .INVAL => error.SocketTypeNotSupported,
+                else => std.posix.unexpectedErrno(err),
+            };
+        }
+        return @intCast(rc);
+    } else {
+        @compileError("posix_compat.socket only implemented for Linux and macOS");
     }
 }
 
 pub fn bind(fd: socket_t, addr: *const sockaddr, len: socklen_t) BindError!void {
-    if (builtin.os.tag != .linux) @compileError("posix_compat.bind only implemented for Linux");
-    const rc = linux.bind(@intCast(fd), @ptrCast(addr), len);
-    switch (linux.errno(rc)) {
-        .SUCCESS => return,
-        .ACCES => return error.AddressUnavailable,
-        .ADDRINUSE => return error.AddressInUse,
-        .ADDRNOTAVAIL => return error.AddressUnavailable,
-        .AFNOSUPPORT => return error.AddressFamilyUnsupported,
-        .NOBUFS, .NOMEM => return error.SystemResources,
-        .NETDOWN => return error.NetworkDown,
-        .PROTONOSUPPORT => return error.ProtocolUnsupportedBySystem,
-        .PFNOSUPPORT => return error.ProtocolUnsupportedByAddressFamily,
-        .NFILE => return error.ProcessFdQuotaExceeded,
-        .MFILE => return error.SystemFdQuotaExceeded,
-        else => |err| return std.posix.unexpectedErrno(err),
+    if (builtin.os.tag == .linux) {
+        const rc = linux.bind(@intCast(fd), @ptrCast(addr), len);
+        switch (linux.errno(rc)) {
+            .SUCCESS => return,
+            .ACCES => return error.AddressUnavailable,
+            .ADDRINUSE => return error.AddressInUse,
+            .ADDRNOTAVAIL => return error.AddressUnavailable,
+            .AFNOSUPPORT => return error.AddressFamilyUnsupported,
+            .NOBUFS, .NOMEM => return error.SystemResources,
+            .NETDOWN => return error.NetworkDown,
+            .PROTONOSUPPORT => return error.ProtocolUnsupportedBySystem,
+            .PFNOSUPPORT => return error.ProtocolUnsupportedByAddressFamily,
+            .NFILE => return error.ProcessFdQuotaExceeded,
+            .MFILE => return error.SystemFdQuotaExceeded,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    } else if (builtin.os.tag == .macos) {
+        const rc = std.c.bind(@intCast(fd), @ptrCast(addr), len);
+        if (rc < 0) {
+            const err = getErrno(rc);
+            return switch (err) {
+                .ACCES => error.AddressUnavailable,
+                .ADDRINUSE => error.AddressInUse,
+                .ADDRNOTAVAIL => error.AddressUnavailable,
+                .AFNOSUPPORT => error.AddressFamilyUnsupported,
+                .NOBUFS, .NOMEM => error.SystemResources,
+                .NETDOWN => error.NetworkDown,
+                .PROTONOSUPPORT => error.ProtocolUnsupportedBySystem,
+                .PFNOSUPPORT => error.ProtocolUnsupportedByAddressFamily,
+                .NFILE => error.ProcessFdQuotaExceeded,
+                .MFILE => error.SystemFdQuotaExceeded,
+                else => std.posix.unexpectedErrno(err),
+            };
+        }
+    } else {
+        @compileError("posix_compat.bind only implemented for Linux and macOS");
     }
 }
 
 pub fn listen(fd: socket_t, backlog: u31) ListenError!void {
-    if (builtin.os.tag != .linux) @compileError("posix_compat.listen only implemented for Linux");
-    const rc = linux.listen(@intCast(fd), backlog);
-    switch (linux.errno(rc)) {
-        .SUCCESS => return,
-        .ADDRINUSE => return error.AddressInUse,
-        .ADDRNOTAVAIL => return error.AddressUnavailable,
-        .NOBUFS, .NOMEM => return error.SystemResources,
-        .NETDOWN => return error.NetworkDown,
-        .NFILE => return error.ProcessFdQuotaExceeded,
-        .MFILE => return error.SystemFdQuotaExceeded,
-        else => |err| return std.posix.unexpectedErrno(err),
+    if (builtin.os.tag == .linux) {
+        const rc = linux.listen(@intCast(fd), backlog);
+        switch (linux.errno(rc)) {
+            .SUCCESS => return,
+            .ADDRINUSE => return error.AddressInUse,
+            .ADDRNOTAVAIL => return error.AddressUnavailable,
+            .NOBUFS, .NOMEM => return error.SystemResources,
+            .NETDOWN => return error.NetworkDown,
+            .NFILE => return error.ProcessFdQuotaExceeded,
+            .MFILE => return error.SystemFdQuotaExceeded,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    } else if (builtin.os.tag == .macos) {
+        const rc = std.c.listen(@intCast(fd), @intCast(backlog));
+        if (rc < 0) {
+            const err = getErrno(rc);
+            return switch (err) {
+                .ADDRINUSE => error.AddressInUse,
+                .ADDRNOTAVAIL => error.AddressUnavailable,
+                .NOBUFS, .NOMEM => error.SystemResources,
+                .NETDOWN => error.NetworkDown,
+                .NFILE => error.ProcessFdQuotaExceeded,
+                .MFILE => error.SystemFdQuotaExceeded,
+                else => std.posix.unexpectedErrno(err),
+            };
+        }
+    } else {
+        @compileError("posix_compat.listen only implemented for Linux and macOS");
     }
 }
 
 pub fn accept(fd: socket_t, addr: ?*sockaddr, len: ?*socklen_t, flags: u32) AcceptError!socket_t {
-    if (builtin.os.tag != .linux) @compileError("posix_compat.accept only implemented for Linux");
-    const addr_cast: ?*linux.sockaddr = if (addr) |a| @ptrCast(a) else null;
-    const rc = if (flags == 0)
-        linux.accept(@intCast(fd), addr_cast, len)
-    else
-        linux.accept4(@intCast(fd), addr_cast, len, flags);
-    switch (linux.errno(rc)) {
-        .SUCCESS => return @intCast(rc),
-        .AGAIN => return error.WouldBlock,
-        .CONNABORTED => return error.ConnectionAborted,
-        .INVAL => return error.SocketNotListening,
-        .NOBUFS, .NOMEM => return error.SystemResources,
-        .NFILE => return error.ProcessFdQuotaExceeded,
-        .MFILE => return error.SystemFdQuotaExceeded,
-        .NETDOWN => return error.NetworkDown,
-        .PERM, .ACCES => return error.BlockedByFirewall,
-        .PROTO => return error.ProtocolFailure,
-        else => |err| return std.posix.unexpectedErrno(err),
+    if (builtin.os.tag == .linux) {
+        const addr_cast: ?*linux.sockaddr = if (addr) |a| @ptrCast(a) else null;
+        const rc = if (flags == 0)
+            linux.accept(@intCast(fd), addr_cast, len)
+        else
+            linux.accept4(@intCast(fd), addr_cast, len, flags);
+        switch (linux.errno(rc)) {
+            .SUCCESS => return @intCast(rc),
+            .AGAIN => return error.WouldBlock,
+            .CONNABORTED => return error.ConnectionAborted,
+            .INVAL => return error.SocketNotListening,
+            .NOBUFS, .NOMEM => return error.SystemResources,
+            .NFILE => return error.ProcessFdQuotaExceeded,
+            .MFILE => return error.SystemFdQuotaExceeded,
+            .NETDOWN => return error.NetworkDown,
+            .PERM, .ACCES => return error.BlockedByFirewall,
+            .PROTO => return error.ProtocolFailure,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    } else if (builtin.os.tag == .macos) {
+        // macOS accept() doesn't support flags parameter
+        const rc = std.c.accept(@intCast(fd), @ptrCast(addr), len);
+        if (rc < 0) {
+            const err = getErrno(rc);
+            return switch (err) {
+                .AGAIN => error.WouldBlock,
+                .CONNABORTED => error.ConnectionAborted,
+                .INVAL => error.SocketNotListening,
+                .NOBUFS, .NOMEM => error.SystemResources,
+                .NFILE => error.ProcessFdQuotaExceeded,
+                .MFILE => error.SystemFdQuotaExceeded,
+                .NETDOWN => error.NetworkDown,
+                .PERM, .ACCES => error.BlockedByFirewall,
+                .PROTO => error.ProtocolFailure,
+                else => std.posix.unexpectedErrno(err),
+            };
+        }
+        return @intCast(rc);
+    } else {
+        @compileError("posix_compat.accept only implemented for Linux and macOS");
     }
 }
 
 pub fn connect(fd: socket_t, addr: *const sockaddr, len: socklen_t) ConnectError!void {
-    if (builtin.os.tag != .linux) @compileError("posix_compat.connect only implemented for Linux");
-    const rc = linux.connect(@intCast(fd), @ptrCast(addr), len);
-    switch (linux.errno(rc)) {
-        .SUCCESS => return,
-        .ADDRNOTAVAIL => return error.AddressUnavailable,
-        .AFNOSUPPORT => return error.AddressFamilyUnsupported,
-        .NOBUFS, .NOMEM => return error.SystemResources,
-        .INPROGRESS => return error.ConnectionPending,
-        .CONNREFUSED => return error.ConnectionRefused,
-        .CONNRESET => return error.ConnectionResetByPeer,
-        .HOSTUNREACH => return error.HostUnreachable,
-        .NETUNREACH => return error.NetworkUnreachable,
-        .TIMEDOUT => return error.Timeout,
-        .ACCESS => return error.AccessDenied,
-        .AGAIN => return error.WouldBlock,
-        .NETDOWN => return error.NetworkDown,
-        else => |err| return std.posix.unexpectedErrno(err),
+    if (builtin.os.tag == .linux) {
+        const rc = linux.connect(@intCast(fd), @ptrCast(addr), len);
+        switch (linux.errno(rc)) {
+            .SUCCESS => return,
+            .ADDRNOTAVAIL => return error.AddressUnavailable,
+            .AFNOSUPPORT => return error.AddressFamilyUnsupported,
+            .NOBUFS, .NOMEM => return error.SystemResources,
+            .INPROGRESS => return error.ConnectionPending,
+            .CONNREFUSED => return error.ConnectionRefused,
+            .CONNRESET => return error.ConnectionResetByPeer,
+            .HOSTUNREACH => return error.HostUnreachable,
+            .NETUNREACH => return error.NetworkUnreachable,
+            .TIMEDOUT => return error.Timeout,
+            .ACCESS => return error.AccessDenied,
+            .AGAIN => return error.WouldBlock,
+            .NETDOWN => return error.NetworkDown,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    } else if (builtin.os.tag == .macos) {
+        const rc = std.c.connect(@intCast(fd), @ptrCast(addr), len);
+        if (rc < 0) {
+            const err = getErrno(rc);
+            return switch (err) {
+                .ADDRNOTAVAIL => error.AddressUnavailable,
+                .AFNOSUPPORT => error.AddressFamilyUnsupported,
+                .NOBUFS, .NOMEM => error.SystemResources,
+                .INPROGRESS => error.ConnectionPending,
+                .CONNREFUSED => error.ConnectionRefused,
+                .CONNRESET => error.ConnectionResetByPeer,
+                .HOSTUNREACH => error.HostUnreachable,
+                .NETUNREACH => error.NetworkUnreachable,
+                .TIMEDOUT => error.Timeout,
+                .ACCES => error.AccessDenied,
+                .AGAIN => error.WouldBlock,
+                .NETDOWN => error.NetworkDown,
+                else => std.posix.unexpectedErrno(err),
+            };
+        }
+    } else {
+        @compileError("posix_compat.connect only implemented for Linux and macOS");
     }
 }
 
 pub fn shutdown(fd: socket_t, how: ShutdownHow) ShutdownError!void {
-    if (builtin.os.tag != .linux) @compileError("posix_compat.shutdown only implemented for Linux");
-    const rc = linux.shutdown(@intCast(fd), @intFromEnum(how));
-    switch (linux.errno(rc)) {
-        .SUCCESS => return,
-        .NOTCONN => return error.SocketNotConnected,
-        else => |err| return std.posix.unexpectedErrno(err),
+    if (builtin.os.tag == .linux) {
+        const rc = linux.shutdown(@intCast(fd), @intFromEnum(how));
+        switch (linux.errno(rc)) {
+            .SUCCESS => return,
+            .NOTCONN => return error.SocketNotConnected,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    } else if (builtin.os.tag == .macos) {
+        const rc = std.c.shutdown(@intCast(fd), @intFromEnum(how));
+        if (rc < 0) {
+            const err = getErrno(rc);
+            return switch (err) {
+                .NOTCONN => error.SocketNotConnected,
+                else => std.posix.unexpectedErrno(err),
+            };
+        }
+    } else {
+        @compileError("posix_compat.shutdown only implemented for Linux and macOS");
     }
 }
 
 pub fn getsockname(fd: socket_t, addr: *sockaddr, len: *socklen_t) UnexpectedError!void {
-    if (builtin.os.tag != .linux) @compileError("posix_compat.getsockname only implemented for Linux");
-    const rc = linux.getsockname(@intCast(fd), @ptrCast(addr), len);
-    switch (linux.errno(rc)) {
-        .SUCCESS => return,
-        else => |err| return std.posix.unexpectedErrno(err),
+    if (builtin.os.tag == .linux) {
+        const rc = linux.getsockname(@intCast(fd), @ptrCast(addr), len);
+        switch (linux.errno(rc)) {
+            .SUCCESS => return,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    } else if (builtin.os.tag == .macos) {
+        const rc = std.c.getsockname(@intCast(fd), @ptrCast(addr), len);
+        if (rc < 0) {
+            const err = getErrno(rc);
+            return std.posix.unexpectedErrno(err);
+        }
+    } else {
+        @compileError("posix_compat.getsockname only implemented for Linux and macOS");
     }
 }
 
 pub fn write(fd: socket_t, buf: []const u8) WriteError!usize {
-    if (builtin.os.tag != .linux) @compileError("posix_compat.write only implemented for Linux");
     if (buf.len == 0) return 0;
-    const rc = linux.write(@intCast(fd), buf.ptr, buf.len);
-    switch (linux.errno(rc)) {
-        .SUCCESS => return @intCast(rc),
-        .AGAIN => return error.WouldBlock,
-        .PIPE => return error.BrokenPipe,
-        .CONNRESET => return error.ConnectionResetByPeer,
-        .IO => return error.InputOutput,
-        .NOBUFS, .NOMEM => return error.SystemResources,
-        .PERM, .ACCES => return error.AccessDenied,
-        .NETDOWN => return error.NetworkDown,
-        .NOTCONN => return error.SocketNotConnected,
-        else => |err| return std.posix.unexpectedErrno(err),
+    if (builtin.os.tag == .linux) {
+        const rc = linux.write(@intCast(fd), buf.ptr, buf.len);
+        switch (linux.errno(rc)) {
+            .SUCCESS => return @intCast(rc),
+            .AGAIN => return error.WouldBlock,
+            .PIPE => return error.BrokenPipe,
+            .CONNRESET => return error.ConnectionResetByPeer,
+            .IO => return error.InputOutput,
+            .NOBUFS, .NOMEM => return error.SystemResources,
+            .PERM, .ACCES => return error.AccessDenied,
+            .NETDOWN => return error.NetworkDown,
+            .NOTCONN => return error.SocketNotConnected,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    } else if (builtin.os.tag == .macos) {
+        const rc = std.c.write(@intCast(fd), buf.ptr, buf.len);
+        if (rc < 0) {
+            const err = getErrno(rc);
+            return switch (err) {
+                .AGAIN => error.WouldBlock,
+                .PIPE => error.BrokenPipe,
+                .CONNRESET => error.ConnectionResetByPeer,
+                .IO => error.InputOutput,
+                .NOBUFS, .NOMEM => error.SystemResources,
+                .PERM, .ACCES => error.AccessDenied,
+                .NETDOWN => error.NetworkDown,
+                .NOTCONN => error.SocketNotConnected,
+                else => std.posix.unexpectedErrno(err),
+            };
+        }
+        return @intCast(rc);
+    } else {
+        @compileError("posix_compat.write only implemented for Linux and macOS");
     }
 }
 
 pub fn writev(fd: socket_t, vec: []const iovec_const) WritevError!usize {
-    if (builtin.os.tag != .linux) @compileError("posix_compat.writev only implemented for Linux");
     if (vec.len == 0) return 0;
-    const rc = linux.writev(@intCast(fd), @ptrCast(vec.ptr), vec.len);
-    switch (linux.errno(rc)) {
-        .SUCCESS => return @intCast(rc),
-        .AGAIN => return error.WouldBlock,
-        .PIPE => return error.BrokenPipe,
-        .CONNRESET => return error.ConnectionResetByPeer,
-        .IO => return error.InputOutput,
-        .NOBUFS, .NOMEM => return error.SystemResources,
-        .PERM, .ACCES => return error.AccessDenied,
-        .NETDOWN => return error.NetworkDown,
-        .NOTCONN => return error.SocketNotConnected,
-        else => |err| return std.posix.unexpectedErrno(err),
+    if (builtin.os.tag == .linux) {
+        const rc = linux.writev(@intCast(fd), @ptrCast(vec.ptr), vec.len);
+        switch (linux.errno(rc)) {
+            .SUCCESS => return @intCast(rc),
+            .AGAIN => return error.WouldBlock,
+            .PIPE => return error.BrokenPipe,
+            .CONNRESET => return error.ConnectionResetByPeer,
+            .IO => return error.InputOutput,
+            .NOBUFS, .NOMEM => return error.SystemResources,
+            .PERM, .ACCES => return error.AccessDenied,
+            .NETDOWN => return error.NetworkDown,
+            .NOTCONN => return error.SocketNotConnected,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    } else if (builtin.os.tag == .macos) {
+        const rc = std.c.writev(@intCast(fd), @ptrCast(vec.ptr), @intCast(vec.len));
+        if (rc < 0) {
+            const err = getErrno(rc);
+            return switch (err) {
+                .AGAIN => error.WouldBlock,
+                .PIPE => error.BrokenPipe,
+                .CONNRESET => error.ConnectionResetByPeer,
+                .IO => error.InputOutput,
+                .NOBUFS, .NOMEM => error.SystemResources,
+                .PERM, .ACCES => error.AccessDenied,
+                .NETDOWN => error.NetworkDown,
+                .NOTCONN => error.SocketNotConnected,
+                else => std.posix.unexpectedErrno(err),
+            };
+        }
+        return @intCast(rc);
+    } else {
+        @compileError("posix_compat.writev only implemented for Linux and macOS");
     }
 }
 
@@ -289,16 +461,50 @@ pub fn getrandom(buf: []u8) std.Io.RandomSecureError!void {
     return io.randomSecure(buf);
 }
 
-pub const ShutdownHow = enum(u32) {
-    recv = linux.SHUT.RD,
-    send = linux.SHUT.WR,
-    both = linux.SHUT.RDWR,
-};
+pub const ShutdownHow = if (builtin.os.tag == .linux)
+    enum(u32) {
+        recv = linux.SHUT.RD,
+        send = linux.SHUT.WR,
+        both = linux.SHUT.RDWR,
+    }
+else
+    enum(u32) {
+        recv = 0,
+        send = 1,
+        both = 2,
+    };
+
+pub const timespec = std.posix.timespec;
 
 pub fn kqueue() UnexpectedError!fd_t {
-    @compileError("kqueue not supported on this platform");
+    if (builtin.os.tag == .macos) {
+        const rc = std.c.kqueue();
+        if (rc < 0) {
+            const err = getErrno(rc);
+            return std.posix.unexpectedErrno(err);
+        }
+        return @intCast(rc);
+    } else {
+        @compileError("kqueue only supported on macOS");
+    }
 }
 
-pub fn kevent(_: fd_t, _: []const Kevent, _: []Kevent, _: ?*const std.posix.timespec) UnexpectedError!usize {
-    @compileError("kevent not supported on this platform");
+pub fn kevent(kq: fd_t, changelist: []const Kevent, eventlist: []Kevent, timeout: ?*const timespec) UnexpectedError!usize {
+    if (builtin.os.tag == .macos) {
+        const rc = std.c.kevent(
+            @intCast(kq),
+            @ptrCast(changelist.ptr),
+            @intCast(changelist.len),
+            @ptrCast(eventlist.ptr),
+            @intCast(eventlist.len),
+            timeout,
+        );
+        if (rc < 0) {
+            const err = getErrno(rc);
+            return std.posix.unexpectedErrno(err);
+        }
+        return @intCast(rc);
+    } else {
+        @compileError("kevent only supported on macOS");
+    }
 }
