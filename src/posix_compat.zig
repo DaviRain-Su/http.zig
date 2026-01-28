@@ -112,7 +112,7 @@ pub fn socket(domain: u32, socket_type: u32, protocol: u32) SocketError!socket_t
         const rc = linux.socket(@intCast(domain), @intCast(socket_type), @intCast(protocol));
         switch (linux.errno(rc)) {
             .SUCCESS => return @intCast(rc),
-            .ACCES => return error.AccessDenied,
+            .ACCES => error.AccessDenied,
             .AFNOSUPPORT => return error.AddressFamilyUnsupported,
             .PROTONOSUPPORT, .NOPROTOOPT => return error.ProtocolNotSupported,
             .NFILE => return error.ProcessFdQuotaExceeded,
@@ -122,21 +122,61 @@ pub fn socket(domain: u32, socket_type: u32, protocol: u32) SocketError!socket_t
             else => |err| return std.posix.unexpectedErrno(err),
         }
     } else if (builtin.os.tag == .macos) {
-        const rc = std.c.socket(@intCast(domain), @intCast(socket_type), @intCast(protocol));
+        // macOS doesn't support SOCK_CLOEXEC and SOCK_NONBLOCK in socket()
+        // These need to be set via fcntl() after socket creation
+        // Extract just the socket type (SOCK_STREAM=1, SOCK_DGRAM=2, etc.)
+        const clean_type = socket_type & 0xff;
+        const needs_nonblock = (socket_type & std.posix.SOCK.NONBLOCK) != 0; // 0x10000 on macOS
+        const needs_cloexec = (socket_type & std.posix.SOCK.CLOEXEC) != 0;  // 0x8000 on macOS
+
+        const rc = std.c.socket(@intCast(domain), @intCast(clean_type), @intCast(protocol));
         if (rc < 0) {
             const err = getErrno(rc);
             return switch (err) {
                 .ACCES => error.AccessDenied,
-                .AFNOSUPPORT => error.AddressFamilyUnsupported,
-                .PROTONOSUPPORT, .NOPROTOOPT => error.ProtocolNotSupported,
-                .NFILE => error.ProcessFdQuotaExceeded,
-                .MFILE => error.SystemFdQuotaExceeded,
-                .NOMEM, .NOBUFS => error.SystemResources,
-                .INVAL => error.SocketTypeNotSupported,
+                .AFNOSUPPORT => return error.AddressFamilyUnsupported,
+                .PROTONOSUPPORT, .NOPROTOOPT, .PROTOTYPE => return error.ProtocolNotSupported,
+                .NFILE => return error.ProcessFdQuotaExceeded,
+                .MFILE => return error.SystemFdQuotaExceeded,
+                .NOMEM, .NOBUFS => return error.SystemResources,
+                .INVAL => return error.SocketTypeNotSupported,
                 else => std.posix.unexpectedErrno(err),
             };
         }
-        return @intCast(rc);
+        const fd: socket_t = @intCast(rc);
+
+        // Set CLOEXEC via fcntl if requested
+        if (needs_cloexec) {
+            var cloexec_flags = std.c.fcntl(fd, std.posix.F.GETFD, @as(c_int, 0));
+            if (cloexec_flags < 0) {
+                _ = std.c.close(fd);
+                return error.SystemResources;
+            }
+            cloexec_flags |= std.posix.FD_CLOEXEC;
+            const set_result = std.c.fcntl(fd, std.posix.F.SETFD, cloexec_flags);
+            if (set_result < 0) {
+                _ = std.c.close(fd);
+                return error.SystemResources;
+            }
+        }
+
+        // Set NONBLOCK via fcntl if requested
+        if (needs_nonblock) {
+            const O_NONBLOCK: c_int = 0x0004; // macOS O_NONBLOCK value
+            var nonblock_flags = std.c.fcntl(fd, std.posix.F.GETFL, @as(c_int, 0));
+            if (nonblock_flags < 0) {
+                _ = std.c.close(fd);
+                return error.SystemResources;
+            }
+            nonblock_flags |= O_NONBLOCK;
+            const set_result = std.c.fcntl(fd, std.posix.F.SETFL, nonblock_flags);
+            if (set_result < 0) {
+                _ = std.c.close(fd);
+                return error.SystemResources;
+            }
+        }
+
+        return fd;
     } else {
         @compileError("posix_compat.socket only implemented for Linux and macOS");
     }
@@ -236,6 +276,10 @@ pub fn accept(fd: socket_t, addr: ?*sockaddr, len: ?*socklen_t, flags: u32) Acce
         }
     } else if (builtin.os.tag == .macos) {
         // macOS accept() doesn't support flags parameter
+        // We need to use fcntl to set socket options after accept
+        const needs_nonblock = (flags & std.posix.SOCK.NONBLOCK) != 0; // 0x10000 on macOS
+        const needs_cloexec = (flags & std.posix.SOCK.CLOEXEC) != 0;  // 0x8000 on macOS
+
         const rc = std.c.accept(@intCast(fd), @ptrCast(addr), len);
         if (rc < 0) {
             const err = getErrno(rc);
@@ -252,7 +296,33 @@ pub fn accept(fd: socket_t, addr: ?*sockaddr, len: ?*socklen_t, flags: u32) Acce
                 else => std.posix.unexpectedErrno(err),
             };
         }
-        return @intCast(rc);
+        const accepted_fd: socket_t = @intCast(rc);
+
+        // Set CLOEXEC via fcntl if requested
+        if (needs_cloexec) {
+            const cloexec_flags = std.c.fcntl(accepted_fd, std.posix.F.GETFD, @as(c_int, 0));
+            if (cloexec_flags >= 0) {
+                _ = std.c.fcntl(accepted_fd, std.posix.F.SETFD, @as(c_int, @intCast(cloexec_flags | std.posix.FD_CLOEXEC)));
+            }
+        }
+
+        // Set NONBLOCK via fcntl if requested
+        if (needs_nonblock) {
+            const O_NONBLOCK: c_int = 0x0004; // macOS O_NONBLOCK value
+            var nonblock_flags = std.c.fcntl(accepted_fd, std.posix.F.GETFL, @as(c_int, 0));
+            if (nonblock_flags < 0) {
+                _ = std.c.close(accepted_fd);
+                return error.SystemResources;
+            }
+            nonblock_flags |= O_NONBLOCK;
+            const set_result = std.c.fcntl(accepted_fd, std.posix.F.SETFL, nonblock_flags);
+            if (set_result < 0) {
+                _ = std.c.close(accepted_fd);
+                return error.SystemResources;
+            }
+        }
+
+        return accepted_fd;
     } else {
         @compileError("posix_compat.accept only implemented for Linux and macOS");
     }
